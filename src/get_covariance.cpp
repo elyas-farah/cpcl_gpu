@@ -514,7 +514,7 @@ PYBIND11_MODULE(cpcl_cov, m)
     // counts all available CPUs during init -- even though we later call
     // openblas_set_num_threads(1) inside compute_covariance, that is too late.
     // setenv with overwrite=0 so a user-supplied OPENBLAS_NUM_THREADS is respected.
-    std::setenv("OPENBLAS_NUM_THREADS", "1", 0);
+    ::setenv("OPENBLAS_NUM_THREADS", "1", 0);
     if (openblas_set_num_threads)
         openblas_set_num_threads(1);
 #endif
