@@ -43,6 +43,7 @@
 #include <stdexcept>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -506,6 +507,17 @@ py::array_t<double> compute_covariance(
 
 PYBIND11_MODULE(cpcl_cov, m)
 {
+#ifndef __APPLE__
+    // Cap OpenBLAS to 1 thread at module import time, before any BLAS call
+    // triggers lazy initialisation.  Without this, on cluster nodes with many
+    // cores OpenBLAS prints "precompiled NUM_THREADS exceeded" because it
+    // counts all available CPUs during init -- even though we later call
+    // openblas_set_num_threads(1) inside compute_covariance, that is too late.
+    // setenv with overwrite=0 so a user-supplied OPENBLAS_NUM_THREADS is respected.
+    std::setenv("OPENBLAS_NUM_THREADS", "1", 0);
+    if (openblas_set_num_threads)
+        openblas_set_num_threads(1);
+#endif
     m.doc() = "OpenMP-parallel C++ pseudo-Cl covariance kernel "
               "(exact trace reformulation of the brute-force GPU kernel).";
     m.def("compute_covariance", &compute_covariance,
