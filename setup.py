@@ -25,9 +25,48 @@ if sys.platform == "darwin":
             library_dirs.append(str(p / "lib"))
             break
 else:
+    import shutil
+    import subprocess
+    from ctypes.util import find_library
+
     extra_compile_args += ["-fopenmp"]
     extra_link_args += ["-fopenmp"]
-    libraries += ["openblas"]
+
+    # Probe for BLAS: pkg-config (gives include path too), then ldconfig cache.
+    _blas_found = False
+    if shutil.which("pkg-config"):
+        for _pkg in ("openblas", "blas", "cblas"):
+            try:
+                subprocess.check_call(
+                    ["pkg-config", "--exists", _pkg], stderr=subprocess.DEVNULL
+                )
+                for _f in subprocess.check_output(
+                    ["pkg-config", "--cflags", _pkg], stderr=subprocess.DEVNULL
+                ).decode().split():
+                    if _f.startswith("-I"):
+                        include_dirs.append(_f[2:])
+                for _f in subprocess.check_output(
+                    ["pkg-config", "--libs", _pkg], stderr=subprocess.DEVNULL
+                ).decode().split():
+                    if _f.startswith("-L"):
+                        library_dirs.append(_f[2:])
+                    elif _f.startswith("-l"):
+                        libraries.append(_f[2:])
+                _blas_found = True
+                break
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+
+    if not _blas_found:
+        for _name in ("openblas", "blas"):
+            if find_library(_name):
+                libraries.append(_name)
+                _blas_found = True
+                break
+
+    if not _blas_found:
+        # Last resort — user may need to install libopenblas-dev or libblas-dev.
+        libraries.append("openblas")
 
 ext_modules = [
     Extension(
