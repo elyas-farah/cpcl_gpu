@@ -78,11 +78,11 @@ def compute_legendre(cos_theta_ia, lmax):
         return (P_l, P_lp1), P_lp1
     
     carry_init = (jnp.ones_like(cos_theta_ia), cos_theta_ia)
-    _, P_ia = lax.scan(body_fn, carry_init, jnp.arange(2, lmax))
+    _, P_ia = lax.scan(body_fn, carry_init, jnp.arange(1, lmax - 1))
     P_ia = jnp.concatenate([
         jnp.ones_like(cos_theta_ia)[None, :],   # P_0
         cos_theta_ia[None, :],                  # P_1
-        P_ia                        # P_2 ... P_Lmax
+        P_ia                        # P_2 ... P_{lmax-1}
     ], axis=0)
     
     return P_ia
@@ -158,6 +158,123 @@ def batch_covariace(posi, posj, posa, posb, wi, wj, wa, wb, TB, lmax, full_ells,
     return Cov_binned
 
 
+def sample_covariance_healpy(
+    gl, gb, w, wasp, b, Cl_signal, noise_variance, n_realizations=500, seed=42
+):
+    """
+    Monte Carlo benchmark via NaMaster's catalog-based pseudo-Cl estimator.
+
+    For each realisation:
+      1. Draw alm from Cl_signal via hp.synalm up to lmax_signal = len(Cl_signal)-1.
+         This can exceed b.lmax so the full input power spectrum is included.
+      2. Evaluate the field at exact source positions using ducc0's
+         synthesis_general -- the same irregular-grid SHT backend that
+         NaMaster uses internally for NmtFieldCatalog.  This avoids the
+         pixel-window-function attenuation that hp.get_interp_val introduces
+         (bilinear interpolation suppresses power at high ell and would cause
+         the simulation covariance to be systematically low there).
+      3. Add per-source Gaussian noise, then run the NaMaster pipeline:
+             NmtFieldCatalog -> compute_coupled_cell -> wasp.decouple_cell
+    The sample covariance of the resulting binned Cl estimates is a direct
+    benchmark for the analytic covariance from sum_matrices_jitted.
+
+    Args:
+        gl, gb:          Galactic longitude / latitude of sources (degrees), shape (N,)
+        w:               Source weights, shape (N,)
+        wasp:            NmtWorkspace built from the catalog geometry
+        b:               NmtBin object defining the bandpower binning
+        Cl_signal:       Signal power spectrum C_ell[0..lmax_signal], starting from ell=0.
+                         Pass the full input spectrum (e.g. up to ell_max_catalog) so
+                         signal power at ell > b.lmax is correctly included in the field.
+        noise_variance:  White-noise variance added per source (set 0 to disable).
+                         Use the true per-source noise variance, not an inflated proxy.
+        n_realizations:  Number of Monte Carlo draws
+        seed:            RNG seed for reproducibility
+
+    Returns:
+        C_mean:     Mean binned Cl over realisations, shape (nbins,)
+        Cov_sample: Sample covariance matrix, shape (nbins, nbins)
+        estimates:  Per-realisation estimates, shape (n_realizations, nbins)
+    """
+    import healpy as hp
+    import pymaster as nmt
+
+    gl = np.asarray(gl, dtype=float)
+    gb = np.asarray(gb, dtype=float)
+    w  = np.asarray(w,  dtype=float)
+    N  = len(gl)
+    lmax = b.lmax  # NaMaster estimator band-limits to this ell
+
+    # Signal is generated up to lmax_signal (can exceed b.lmax to include full spectrum).
+    lmax_signal = len(np.asarray(Cl_signal)) - 1
+    Cl_padded = np.asarray(Cl_signal, dtype=float)
+
+    # Spherical coordinates in radians: colatitude in [0, pi], longitude in [0, 2pi]
+    theta_hp = np.pi / 2.0 - np.deg2rad(gb)
+    phi_hp   = np.deg2rad(gl) % (2.0 * np.pi)
+
+    # ducc0 synthesis_general evaluates the alm at arbitrary (theta, phi) without
+    # any pixel window function -- this is the same path NaMaster takes internally.
+    try:
+        from ducc0.sht.experimental import synthesis_general as _synth
+        loc = np.column_stack([theta_hp, phi_hp])   # shape (N, 2)
+        _use_ducc = True
+    except ImportError:
+        import warnings
+        warnings.warn(
+            "ducc0 not available; falling back to hp.alm2map + hp.get_interp_val. "
+            "The bilinear interpolation introduces a pixel window function that "
+            "suppresses high-ell power and will cause the simulation covariance to "
+            "be systematically low at small scales. Install ducc0 for exact results.",
+            RuntimeWarning, stacklevel=2,
+        )
+        _use_ducc = False
+        # Choose nside high enough that the pixel window is negligible up to lmax_signal
+        _nside = max(lmax_signal, 64)
+        _nside = 2 ** int(np.ceil(np.log2(_nside)))
+
+    nbins = b.get_n_bands()
+    rng = np.random.default_rng(seed)
+    estimates = np.zeros((n_realizations, nbins))
+
+    try:
+        from tqdm import tqdm
+        loop = tqdm(range(n_realizations), desc='Simulating realisations')
+    except ImportError:
+        loop = range(n_realizations)
+
+    for r in loop:
+        alm = hp.synalm(Cl_padded, lmax=lmax_signal, new=True)
+
+        if _use_ducc:
+            # Exact irregular-grid SHT at source positions
+            delta = _synth(
+                alm=alm[np.newaxis, :].astype(np.complex128),
+                spin=0,
+                lmax=lmax_signal,
+                loc=loc,
+                epsilon=1e-8,
+            ).real[0]
+        else:
+            delta = hp.get_interp_val(
+                hp.alm2map(alm, nside=_nside, lmax=lmax_signal), theta_hp, phi_hp
+            )
+
+        if noise_variance > 0.0:
+            delta = delta + rng.standard_normal(N) * np.sqrt(noise_variance)
+
+        f = nmt.NmtFieldCatalog(
+            positions=[gl, gb], weights=w, field=delta[None, :],
+            lmax=lmax, spin=0, lonlat=True,
+        )
+        estimates[r] = wasp.decouple_cell(nmt.compute_coupled_cell(f, f))[0]
+
+    C_mean     = np.mean(estimates, axis=0)
+    Cov_sample = np.cov(estimates.T)
+
+    return C_mean, Cov_sample, estimates
+
+
 def batch_matrix_partitions(pos, w, partition=4):
     """
     Batch position and weight data into partitions for parallelized matrix calculations.
@@ -211,108 +328,3 @@ def batch_matrix_partitions(pos, w, partition=4):
 
 
 
-def load_pcl_dataset(fits_path):
-
-    with fits.open(fits_path) as hdul:
-        
-        pcl_names = sorted(hdu.name for hdu in hdul if hdu.name.startswith("PCL_"))
-
-        if not pcl_names:
-
-            raise ValueError(f"No PCL_* extensions found in {fits_path}")
-
-        if "CELL" not in hdul:
-
-            raise ValueError(f"No CELL extension found in {fits_path}")
-
-        pcl_header = hdul[pcl_names[0]].header
-
-        pcl_tables = [hdul[name].data for name in pcl_names]
-
-        cell_table = hdul["CELL"].data
-        RA = hdul['CATALOG'].data['RA']
-        DEC = hdul['CATALOG'].data['DEC']
-
-
-    ell_eff = np.asarray(pcl_tables[0]["ell_eff"], dtype=float)
-
-    pcl_dm = np.vstack([np.asarray(tab["pcl_dm"], dtype=float) for tab in pcl_tables])
-
-    pcl_dm_gaussian = np.vstack([np.asarray(tab["pcl_dm_gaussian"], dtype=float) for tab in pcl_tables])
-
-    pcl_dm_lognormal = np.vstack([np.asarray(tab["pcl_dm_lognormal"], dtype=float) for tab in pcl_tables])
-
-    theory_ell = np.asarray(cell_table["ell"], dtype=float)
-
-    theory_cl = np.asarray(cell_table["cell"], dtype=float)
-
-    valid_theory = np.isfinite(theory_ell) & np.isfinite(theory_cl) & (theory_ell >= 2)
-
-    theory_ell = theory_ell[valid_theory]
-
-    theory_cl = theory_cl[valid_theory]
-
-
-
-    pcl_lmin = int(pcl_header.get("LMIN", max(2, np.floor(ell_eff.min()))))
-
-    pcl_lmax = int(pcl_header.get("LMAX", np.ceil(ell_eff.max())))
-
-    pcl_nbin = int(pcl_header.get("NBIN", len(ell_eff)))
-
-    pcl_edges = np.rint(np.geomspace(pcl_lmin, pcl_lmax + 1, pcl_nbin + 1)).astype(int)
-
-    pcl_edges[0] = pcl_lmin
-
-    pcl_edges[-1] = pcl_lmax + 1
-
-    pcl_edges = np.unique(pcl_edges)
-
-
-
-    if len(pcl_edges) - 1 == len(ell_eff):
-
-        theory_binned = np.full(len(ell_eff), np.nan, dtype=float)
-
-        for index, (ell_lo, ell_hi) in enumerate(zip(pcl_edges[:-1], pcl_edges[1:])):
-
-            in_bin = (theory_ell >= ell_lo) & (theory_ell < ell_hi)
-
-            if np.any(in_bin):
-
-                theory_binned[index] = np.mean(theory_cl[in_bin])
-
-    else:
-
-        theory_binned = np.interp(ell_eff, theory_ell, theory_cl, left=np.nan, right=np.nan)
-
-
-
-    return {
-
-        "path": Path(fits_path),
-
-        "label": Path(fits_path).stem,
-
-        "ell_eff": ell_eff,
-        "pcl_edges": pcl_edges,
-
-        "theory_ell": theory_ell,
-
-        "theory_cl": theory_cl,
-
-        "theory_binned": theory_binned,
-
-        "series": {
-
-            "DM": pcl_dm,
-
-            "DM + Gaussian noise": pcl_dm_gaussian,
-
-            "DM + lognormal noise": pcl_dm_lognormal,
-
-        },
-        'RA': RA,
-        'DEC': DEC
-
-    }
