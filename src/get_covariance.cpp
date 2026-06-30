@@ -55,6 +55,13 @@ extern "C"
 {
 #include <cblas.h>
 }
+// OpenBLAS exposes openblas_set_num_threads() to cap its internal thread pool.
+// Declared weak so the binary links cleanly against non-OpenBLAS BLAS (MKL,
+// ATLAS, reference BLAS) where the symbol does not exist.  Calling this before
+// our OpenMP parallel region stops OpenBLAS from mixing pthreads with OMP and
+// triggering the "Detect OpenMP Loop / may hang" warning on clusters where
+// OpenBLAS was built without USE_OPENMP=1.
+extern "C" void openblas_set_num_threads(int) __attribute__((weak));
 #endif
 
 namespace py = pybind11;
@@ -402,6 +409,14 @@ py::array_t<double> compute_covariance(
             tasks.emplace_back(P, Q);
 
     std::vector<double> Cov(static_cast<size_t>(n_bins) * n_bins, 0.0);
+
+#ifndef __APPLE__
+    // One BLAS thread per call: each OMP thread drives its own GEMM serially,
+    // so OpenBLAS must not spawn additional threads or it deadlocks on clusters
+    // where it was compiled without USE_OPENMP=1.
+    if (openblas_set_num_threads)
+        openblas_set_num_threads(1);
+#endif
 
     // Progress tracking: atomic counter incremented by each thread with
     // relaxed ordering (no synchronisation cost). fetch_add returns unique
