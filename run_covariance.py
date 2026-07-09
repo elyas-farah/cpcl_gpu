@@ -25,8 +25,8 @@ from utils2 import *
 # Load data  ← edit this path as needed
 # ---------------------------------------------------------------------------
 
-#data = np.load("mock_masked_fixed.npz")
-data = np.load("./plots/mock_catalog.npz")
+data = np.load("./plots/mock_masked_fixed.npz")
+#data = np.load("./plots/mock_catalog.npz")
 
 print(data.files)
 
@@ -170,7 +170,6 @@ ax.set_title('Diagonal ratio (target: 1)')
 ax.legend()
 plt.tight_layout()
 plt.savefig('covariance_ratio.png', dpi=150)
-plt.show()
 
 np.savez(
     './plots/covariance_forecast_analytic.npz',
