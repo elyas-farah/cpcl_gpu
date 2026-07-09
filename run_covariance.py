@@ -25,8 +25,8 @@ from utils2 import *
 # Load data  ← edit this path as needed
 # ---------------------------------------------------------------------------
 
-data = np.load("./plots/mock_masked_fixed.npz")
-#data = np.load("./plots/mock_catalog.npz")
+#data = np.load("./plots/mock_masked_fixed.npz")
+data = np.load("./plots/mock_catalog.npz")
 
 print(data.files)
 
@@ -94,19 +94,28 @@ ells      = b.get_effective_ells()
 full_ells = np.arange(0, edges[-1], dtype=float)
 
 cl_th                    = data['cell']
-cl_th_coupled            = wasp.couple_cell(cl_th[None, :edges[-1]])
-cl_th_decoupled          = wasp.decouple_cell(cl_th_coupled)
-cl_th_decoupled_unbinned = b.unbin_cell(cl_th_decoupled)[0]
+
+# Correlator spectrum for xi(theta) = sum_l (2l+1) C_l P_l / 4pi.  This must be
+# the SHARP, per-l true signal spectrum.  Do NOT feed the bandpower-averaged
+# (piecewise-constant) spectrum here: the covariance ~ C_l^2, so over a wide,
+# steep low-l bandpower <C^2> >> <C>^2 and a bin-smoothed spectrum under-predicts
+# the low-l covariance by up to ~3x (widest, lowest bin).  [The eq.(A-'S_l^B')
+# constant-per-band approximation in the paper's Appendix is only adequate for
+# narrow bins / flat spectra; use the sharp spectrum in general.]
+cl_th_sharp = np.zeros(int(edges[-1]))
+_ncl = min(len(cl_th), int(edges[-1]))
+cl_th_sharp[:_ncl] = cl_th[:_ncl]
+cl_th_sharp[0] = cl_th_sharp[1] = 0.0
 
 cov = np.cov(data['pcl_dm'].T)
 
 # White-noise floor sigma_N^2 to put on the diagonal of the field correlator.
 # It must be the residual per-source *variance* NOT captured by the signal
-# spectrum that the kernel actually uses to build xi(theta).  The kernel's
-# xi(1) = sum_l (2l+1) Sl / 4pi with Sl = cl_th_decoupled_unbinned, so the
-# signal-variance baseline must be computed from the SAME spectrum, and we use
-# the field variance (mean is subtracted in the pseudo-Cl, so no +mean**2).
-field_variance = np.sum((2 * full_ells + 1) * cl_th_decoupled_unbinned) / 4.0 / np.pi
+# spectrum that the kernel uses to build xi(theta).  The kernel's
+# xi(1) = sum_l (2l+1) Sl / 4pi with Sl = cl_th_sharp, so the signal-variance
+# baseline is computed from the SAME spectrum, and we use the field variance
+# (mean is subtracted in the pseudo-Cl, so no +mean**2).
+field_variance = np.sum((2 * full_ells + 1) * cl_th_sharp) / 4.0 / np.pi
 var_f          = np.var(DM)                       # field is mean-subtracted in the pCl
 noise_variance = var_f - field_variance
 # NOTE: estimating this from a single stored realisation (DM = dm_all[0]) is
@@ -145,7 +154,7 @@ print('Diagonal fractional jackknife error (cov_err / cov):',
 
 cov_gpu_th = cpcl_cov.compute_covariance(
     pos, w, TB, int(edges[-1]), full_ells,
-    cl_th_decoupled_unbinned, noise_variance,
+    cl_th_sharp, noise_variance,
 )
 
 # ---------------------------------------------------------------------------
@@ -172,14 +181,14 @@ plt.tight_layout()
 plt.savefig('covariance_ratio.png', dpi=150)
 
 np.savez(
-    './plots/covariance_forecast_analytic.npz',
+    './plots/covariance_catalog_analytic.npz',
     cov_theory=cov_gpu_th,
     ell_eff=ell_eff,
     cov_err=cov_err,
     sigma_data=sigma_data,
     sigma_data_err=sigma_data_err,
 )
-print('Saved covariance_forecast_analytic.npz')
+print('Saved covariance_catalog_analytic.npz')
 
 
 # ===========================================================================
