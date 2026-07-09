@@ -25,8 +25,8 @@ from utils2 import *
 # Load data  ← edit this path as needed
 # ---------------------------------------------------------------------------
 
-#data = np.load("./plots/mock_masked_fixed.npz")
-data = np.load("./plots/mock_catalog.npz")
+data = np.load("./plots/mock_masked_fixed.npz")
+#data = np.load("./plots/mock_catalog.npz")
 
 print(data.files)
 
@@ -181,14 +181,14 @@ plt.tight_layout()
 plt.savefig('covariance_ratio.png', dpi=150)
 
 np.savez(
-    './plots/covariance_catalog_analytic.npz',
+    './plots/covariance_forecast_analytic.npz',
     cov_theory=cov_gpu_th,
     ell_eff=ell_eff,
     cov_err=cov_err,
     sigma_data=sigma_data,
     sigma_data_err=sigma_data_err,
 )
-print('Saved covariance_catalog_analytic.npz')
+print('Saved covariance_forecast_analytic.npz')
 
 
 # ===========================================================================
