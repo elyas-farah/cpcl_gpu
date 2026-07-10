@@ -30,7 +30,7 @@ kevin = True
 
 
 if kevin:
-    data = np.load("./plots/mock_catalog_DSA_Kevin_20260710.npz")
+    data = np.load("./plots/mock_catalog_CHIME_Kevin_20260710_noise_sigma150.npz")
 else: 
     data = np.load("./plots/mock_masked_fixed.npz")
     data = np.load("./plots/mock_catalog.npz")
