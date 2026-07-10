@@ -25,14 +25,28 @@ from utils2 import *
 # Load data  ← edit this path as needed
 # ---------------------------------------------------------------------------
 
-#data = np.load("./plots/mock_masked_fixed.npz")
-data = np.load("./plots/mock_catalog.npz")
 
+kevin = True
+
+
+if kevin:
+    data = np.load("./plots/mock_catalog_DSA_Kevin_20260710.npz")
+else: 
+    data = np.load("./plots/mock_masked_fixed.npz")
+    data = np.load("./plots/mock_catalog.npz")
 print(data.files)
+
 
 RA  = data['ra']
 DEC = data['dec']
-DM  = data['DM']
+if kevin:
+    DM  = data['DM_gaussian'][0,:]
+    data1 = np.load("./plots/mock_masked_fixed.npz")
+    edges       = data1['pcl_edges']
+else:
+    DM  = data['DM']
+    edges       = data['pcl_edges']
+
 
 transformation = SkyCoord(ra=RA*u.degree, dec=DEC*u.degree, frame='icrs').galactic
 gl, gb = np.array(transformation.l), np.array(transformation.b)
@@ -42,7 +56,6 @@ pos = np.array([gl, gb])
 # Binning and mode-coupling matrix
 # ---------------------------------------------------------------------------
 
-edges       = data['pcl_edges']
 lmin        = np.min(edges)
 lmax_nside  = np.max(edges)
 lmax        = lmax_nside
@@ -93,7 +106,10 @@ Sl_unbinned = b.unbin_cell(Sl)[0]
 ells      = b.get_effective_ells()
 full_ells = np.arange(0, edges[-1], dtype=float)
 
-cl_th                    = data['cell']
+if kevin:
+    cl_th                    = data1['cell']
+else:
+    cl_th                    = data['cell']
 
 # Correlator spectrum for xi(theta) = sum_l (2l+1) C_l P_l / 4pi.  This must be
 # the SHARP, per-l true signal spectrum.  Do NOT feed the bandpower-averaged
@@ -107,7 +123,10 @@ _ncl = min(len(cl_th), int(edges[-1]))
 cl_th_sharp[:_ncl] = cl_th[:_ncl]
 cl_th_sharp[0] = cl_th_sharp[1] = 0.0
 
-cov = np.cov(data['pcl_dm'].T)
+if kevin:
+    cov = np.cov(data1['pcl_dm_gaussian'].T)
+else:
+    cov = np.cov(data['pcl_dm'].T)
 
 # White-noise floor sigma_N^2 to put on the diagonal of the field correlator.
 # It must be the residual per-source *variance* NOT captured by the signal
@@ -141,7 +160,10 @@ noise_variance = var_f - field_variance
 # ---------------------------------------------------------------------------
 
 n_blocks   = 100
-pcl_dm     = data['pcl_dm']
+if kevin:
+    pcl_dm     = data1['pcl_dm_gaussian']
+else:
+    pcl_dm     = data['pcl_dm']
 N_real     = pcl_dm.shape[0]
 block_size = N_real // n_blocks
 
@@ -175,7 +197,10 @@ cov_gpu_th = cpcl_cov.compute_covariance(
 # Plot and save
 # ---------------------------------------------------------------------------
 
-ell_eff = data['pcl_ell_eff']
+if kevin:
+    ell_eff = data1['pcl_ell_eff']
+else:
+    ell_eff = data['pcl_ell_eff']
 Cov_sim = cov
 
 fig, ax = plt.subplots()
@@ -194,15 +219,25 @@ ax.legend()
 plt.tight_layout()
 plt.savefig('covariance_ratio.png', dpi=150)
 
-np.savez(
-    './plots/covariance_catalog_analytic.npz',
-    cov_theory=cov_gpu_th,
-    ell_eff=ell_eff,
-    cov_err=cov_err,
-    sigma_data=sigma_data,
-    sigma_data_err=sigma_data_err,
-)
-print('Saved covariance_catalog_analytic.npz')
+if kevin:
+    np.savez(
+        './plots/covariance_catalog_forecast_kevin.npz',
+        cov_theory=cov_gpu_th,
+        ell_eff=ell_eff,
+        cov_err=cov_err,
+        sigma_data=sigma_data,
+        sigma_data_err=sigma_data_err,
+    )
+else:
+    np.savez(
+        './plots/covariance_catalog_analytic.npz',
+        cov_theory=cov_gpu_th,
+        ell_eff=ell_eff,
+        cov_err=cov_err,
+        sigma_data=sigma_data,
+        sigma_data_err=sigma_data_err,
+    )
+print('Saved covariance_catalog_forecast_kevin.npz')
 
 
 # ===========================================================================
