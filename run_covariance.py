@@ -25,8 +25,8 @@ from utils2 import *
 # Load data  ← edit this path as needed
 # ---------------------------------------------------------------------------
 
-data = np.load("./plots/mock_masked_fixed.npz")
-#data = np.load("./plots/mock_catalog.npz")
+#data = np.load("./plots/mock_masked_fixed.npz")
+data = np.load("./plots/mock_catalog.npz")
 
 print(data.files)
 
@@ -117,6 +117,20 @@ cov = np.cov(data['pcl_dm'].T)
 # (mean is subtracted in the pseudo-Cl, so no +mean**2).
 field_variance = np.sum((2 * full_ells + 1) * cl_th_sharp) / 4.0 / np.pi
 var_f          = np.var(DM)                       # field is mean-subtracted in the pCl
+
+def jackknife_var_err(x):
+    x = np.asarray(x, float)
+    N = x.size
+    S1, S2 = x.sum(), (x**2).sum()
+    Np = N - 1
+    var_i = (S2 - x**2) / Np - ((S1 - x) / Np)**2      # np.var(x) with point i removed
+    return np.sqrt((N - 1) / N * np.sum((var_i - var_i.mean())**2))
+
+var_f   = np.var(DM)
+var_err = jackknife_var_err(DM)
+print(var_err/var_f, "fractional error on var(DM) from jackknife")
+
+
 noise_variance = var_f - field_variance
 # NOTE: estimating this from a single stored realisation (DM = dm_all[0]) is
 # noisy; for a controlled test prefer the self-consistent validator below,
@@ -181,14 +195,14 @@ plt.tight_layout()
 plt.savefig('covariance_ratio.png', dpi=150)
 
 np.savez(
-    './plots/covariance_forecast_analytic.npz',
+    './plots/covariance_catalog_analytic.npz',
     cov_theory=cov_gpu_th,
     ell_eff=ell_eff,
     cov_err=cov_err,
     sigma_data=sigma_data,
     sigma_data_err=sigma_data_err,
 )
-print('Saved covariance_forecast_analytic.npz')
+print('Saved covariance_catalog_analytic.npz')
 
 
 # ===========================================================================
