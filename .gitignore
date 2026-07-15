@@ -9,3 +9,5 @@ dist/
 *.egg
 *.so
 *.pyd
+
+/plots/mock_catalog_DSA_Kevin_20260710.npz
