@@ -1,6 +1,6 @@
 # CPCL GPU
 
-A repository to calculate the covariance matrix of the catalog-based pseudo-Cell (pseudo-Cl) estimator, using GPU acceleration.
+A repository to calculate the covariance matrix of the catalog-based pseudo-Cell (pseudo-Cl) estimator using GPU acceleration.
 
 ## Contents
 
