@@ -12,13 +12,13 @@ from pathlib import Path
 import cpcl_cov
 
 
-from brute_cov import (
+from brute_cov_utils import (
     build_binning_matrix, pad_binning_matrix,
     compute_cos_theta, mcm_binning,
     compute_legendre,
-    sample_covariance_healpy,
+    
 )
-from utils2 import *
+
 
 compute_legendre_jitted = jax.jit(compute_legendre, static_argnames='lmax')
 @jax.jit
@@ -58,17 +58,29 @@ f_mask = nmt.NmtFieldCatalog(positions = [gl, gb], weights = w, field= None,
 
 
 wasp = nmt.NmtWorkspace.from_fields(f_mask, f_mask, b)
-mcm = jnp.asarray(wasp.get_coupling_matrix())
-mcm_inv = np.linalg.inv(mcm)
+mcm = np.asarray(wasp.get_coupling_matrix(), dtype=np.float64)
 
 
 Binning, ell_eff = build_binning_matrix(edges)
 Binning_matrix_padded = pad_binning_matrix(Binning, lmin, lmax)
-Binning_matrix_padded = jnp.array(Binning_matrix_padded)
-TB = Binning_matrix_padded @ mcm_inv
+mcm_binnedB = (Binning_matrix_padded @ mcm @ Binning_matrix_padded.T)
+mcm_binned_inv = np.linalg.inv(mcm_binnedB)
+_unbin = np.zeros((lmax, len(edges) - 1))
+for _bi in range(len(edges) - 1):
+    _unbin[edges[_bi]:edges[_bi + 1], _bi] = 1.0
+TB = jnp.array(np.linalg.inv(Binning_matrix_padded @ mcm @ _unbin) @ Binning_matrix_padded)
 
 
-def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk_size):
+def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk_size,
+                  field_variance_only=False):
+    """
+    field_variance_only: if True, replace the signal correlation function xi(theta)
+        with a Kronecker delta at zero lag, i.e. xi(theta) -> sigma_field^2 * delta(theta).
+        This isolates the "field variance" contribution to the covariance (the term that
+        survives when all off-diagonal signal correlations are killed), which combines
+        with noise_variance exactly like the usual diagonal term. Useful for validating
+        the covariance against e.g. a simple white-noise-plus-field-variance estimate.
+    """
 
     N = pos.shape[1]
     remainder = N % chunk_size
@@ -80,18 +92,43 @@ def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk
     dim_cov  = TB.shape[0]
     carry_init = jnp.zeros((dim_cov, dim_cov))
 
-    N_xi = 100 * lmax
-    # Uniform in theta (not cos theta) gives dense sampling near theta=0,
-    # resolving the rapidly-oscillating Legendre polynomials at large ell.
-    # linspace(pi, 0) -> cos goes from -1 to +1 (ascending, required by jnp.interp).
-    cos_theta_grid = jnp.cos(jnp.linspace(jnp.pi, 0.0, N_xi))
-    P_1d    = compute_legendre_jitted(cos_theta_grid, lmax)
-    xi_grid = jnp.einsum('l, lk -> k',
-                         (2 * full_ells + 1) * Sl_unbinned, P_1d) / 4.0 / np.pi
+    # sigma_field = xi(theta=0) = sum_l (2l+1) Sl / (4 pi), computed exactly
+    # rather than via grid interpolation, since it's the coincident-point limit.
+    sigma_field = jnp.sum((2 * full_ells + 1) * Sl_unbinned) / (4.0 * np.pi)
 
-    def signal_corr_pair(pos_x, pos_y):
-        cos_theta = compute_cos_theta(pos_x[0], pos_x[1], pos_y[0], pos_y[1])
-        return jnp.interp(cos_theta.ravel(), cos_theta_grid, xi_grid).reshape(cos_theta.shape)
+    if not field_variance_only:
+        N_xi = 100 * lmax
+        # Uniform in theta (not cos theta) gives dense sampling near theta=0,
+        # resolving the rapidly-oscillating Legendre polynomials at large ell.
+        # linspace(pi, 0) -> cos goes from -1 to +1 (ascending, required by jnp.interp).
+        cos_theta_grid = jnp.cos(jnp.linspace(jnp.pi, 0.0, N_xi))
+        P_1d    = compute_legendre_jitted(cos_theta_grid, lmax)
+        xi_grid = jnp.einsum('l, lk -> k',
+                             (2 * full_ells + 1) * Sl_unbinned, P_1d) / 4.0 / np.pi
+        jax.debug.print('the size is {}', xi_grid.shape)
+
+        def signal_corr_pair(pos_x, pos_y):
+            cos_theta = compute_cos_theta(pos_x[0], pos_x[1], pos_y[0], pos_y[1])
+            return jnp.interp(cos_theta.ravel(), cos_theta_grid, xi_grid).reshape(cos_theta.shape)
+
+    noise_mat = noise_variance * jnp.eye(chunk_size)
+    field_mat = sigma_field * jnp.eye(chunk_size)
+
+    def full_field_corr(pos_p, pos_q, same_chunk):
+        """Signal (or delta-only field-variance) correlation plus noise, added
+        only on the coincident-chunk diagonal."""
+        if field_variance_only:
+            # Off-diagonal (different chunk) signal correlation is killed entirely;
+            # only the delta-function zero-lag piece + noise survives.
+            return lax.cond(same_chunk,
+                             lambda: field_mat + noise_mat,
+                             lambda: jnp.zeros((chunk_size, chunk_size)))
+        else:
+            signal_corr_pq = signal_corr_pair(pos_p, pos_q)
+            return lax.cond(same_chunk,
+                             lambda s, n: s + n,
+                             lambda s, n: s,
+                             signal_corr_pq, noise_mat)
 
     def sum_over_i(i, carr_i):
         posi = lax.dynamic_slice(pos, (0, i * chunk_size), (2, chunk_size))
@@ -119,12 +156,7 @@ def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk
                     posa = lax.dynamic_slice(pos, (0, a * chunk_size), (2, chunk_size))
                     wa   = lax.dynamic_slice(w,   (a * chunk_size,),  (chunk_size,))
 
-                    signal_corr_ia = signal_corr_pair(posi, posa)
-                    noise_mat      = noise_variance * jnp.eye(chunk_size)
-                    full_field_corr_ia = lax.cond(i == a,
-                                                  lambda s, n: s + n,
-                                                  lambda s, n: s,
-                                                  signal_corr_ia, noise_mat)
+                    full_field_corr_ia = full_field_corr(posi, posa, i == a)
 
                     def sum_over_b(b, carr_b):
                         posb = lax.dynamic_slice(pos, (0, b * chunk_size), (2, chunk_size))
@@ -139,11 +171,7 @@ def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk
                         P_ab           = compute_legendre_jitted(cos_theta_ab, lmax)
                         TBP_ab         = mcm_binning(TB, P_ab)
 
-                        signal_corr_jb = signal_corr_pair(posj, posb)
-                        full_field_corr_jb = lax.cond(j == b,
-                                                       lambda s, n: s + n,
-                                                       lambda s, n: s,
-                                                       signal_corr_jb, noise_mat)
+                        full_field_corr_jb = full_field_corr(posj, posb, j == b)
 
                         Cov_binned = (4 * jnp.einsum('ij, aij, km, bkm, ik, jm -> ab',
                                                       w_ij, TBP_ij,
@@ -164,6 +192,8 @@ def sum_matrices(pos, w, TB, lmax, full_ells, Sl_unbinned, noise_variance, chunk
 
     return lax.fori_loop(0, n_chunks, sum_over_i, carry_init)
 
+
+sum_matrices_jitted = jit(sum_matrices, static_argnames=('lmax', 'chunk_size', 'field_variance_only'))
 
 
 
@@ -245,4 +275,3 @@ plt.tight_layout()
 plt.show()
 
 np.savez("covariance_forecast.npz", cov=cov_cpp, ell_eff=ell_eff, cov_err=cov_err, sigma_data=sigma_data, sigma_data_err=sigma_data_err)
-#np.savez("covariance_catalog.npz", cov=cov_gpu_th, ell_eff=ell_eff, cov_err=cov_err, sigma_data=sigma_data, sigma_data_err=sigma_data_err)
