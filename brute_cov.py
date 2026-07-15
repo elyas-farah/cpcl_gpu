@@ -63,8 +63,8 @@ def compute_cos_theta(gl_i, gb_i, gl_j, gb_j):
                              gl_j * deg, gb_j * deg)
 
 @jit
-def mcm_binning( TB, P):
-    return jnp.einsum('la, aij->lij', TB, P)
+def mcm_binning( mcm_binned_inv, BP):
+    return jnp.einsum('la, aij->lij', mcm_binned_inv, BP)
 
 @jit
 def corr(s, P):
